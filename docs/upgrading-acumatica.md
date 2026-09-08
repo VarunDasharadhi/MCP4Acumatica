@@ -202,3 +202,29 @@ concrete commands here when they do:
   are version-specific.
 - **GI descriptions (planned, 26R1).** If the `MCPGIIndex` meta-GI is published, confirm it
   still resolves and its description columns still exist after the upgrade.
+
+---
+
+## Summary (migrated from CLAUDE.md, 2026-09-08)
+
+CLAUDE.md kept a condensed version of this checklist. Moved here verbatim so the full guide and the summary live in one place.
+
+## Acumatica Version Upgrades
+
+When the connected instance moves to a new Acumatica release (e.g. 2025 R2 → 2026 R1) or is
+repointed at a different instance/tenant, follow **`docs/upgrading-acumatica.md`** (served at
+`/docs/upgrading-acumatica`). Summary of what's version-coupled in this server:
+
+1. **`ACUMATICA_ENDPOINT_VERSION`** (contract base `/entity/Default/{version}`) — update the var, redeploy; preflight (`/docs/admin/preflight`) flags a wrong value.
+2. **Schema-knowledge index** — re-export the instance's `swagger.json` and `npm run build-index` (0.34.0+); otherwise `acumatica_search_schema`/`_get_schema_entity`/`_list_schema_entities` describe the old shape. No redeploy needed; the next DO instance reads the new R2 object.
+3. **Runtime metadata cache** — `acumatica_clear_cache` (entity `$adHocSchema`, GI list, GI field schemas are cached 24 h / 1 h).
+4. **Access-control prerequisites** — `MCP Access` role + `MCPAccess` canary GI (OData-exposed) + Connected App (Authorization Code flow + redirect URIs; scopes are request-side, not configured on the app) survive upgrades but should be re-verified.
+5. **Hardcoded entities** — `GETTER_TOOLS` (`src/tools/getter-registry.ts`) entity names are stable across releases but spot-check key entities and update entries if upstream renames/removes one.
+6. **Two independent version numbers** — the **MCP server version** (`0.34.0`, bumps each release) vs. the **targeted Acumatica release** (the `25R2`/`26R1` *tag prefix*, changed only when re-targeting).
+
+> **Maintenance instruction (standing):** whenever a feature is added that depends on the
+> Acumatica version — a new index built from instance data (DAC, GI examples), a hardcoded
+> endpoint/entity, a new cached artifact, or a published meta-GI — add its concrete upgrade
+> step to `docs/upgrading-acumatica.md` (it has a "Forward-looking" section staging the
+> planned ones). Treat this as part of finishing such a feature, not a follow-up.
+

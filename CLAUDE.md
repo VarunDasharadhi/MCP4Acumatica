@@ -11,6 +11,8 @@ Remote MCP (Model Context Protocol) server on Cloudflare Workers that connects C
 - **Deployed at:** `https://mcp4acumatica.hallboys.com` (primary custom domain) / `https://acumatica-mcp.hallboys.com` (legacy alias, kept active during migration) / `https://mcp4acumatica.<account>.workers.dev` (workers.dev fallback)
 - **GitHub:** `https://github.com/hallboys/MCP4Acumatica`
 
+Backlog and known issues: docs/BACKLOG.md. Version history: CHANGELOG.md. Dormant since 2026-07, inbound only.
+
 ## Architecture
 
 ```
@@ -88,7 +90,7 @@ Acumatica is the sole identity provider. Users log in with their Acumatica crede
 
 ## Key Design Decisions
 
-1. **Acumatica as sole OAuth provider.** The MCP server redirects directly to Acumatica for login. No separate identity provider layer. See "Historical Note" below for why. The `/callback` route binds the OAuth `state` query parameter to an HttpOnly `acu_oauth_state` cookie set at `/authorize`; mismatch burns the KV state record (`acumatica_state:{state}`) as well as rejecting the request, so the record is single-use even on mismatch.
+1. **Acumatica as sole OAuth provider.** The MCP server redirects directly to Acumatica for login. No separate identity provider layer. See `docs/DECISIONS.md` for why. The `/callback` route binds the OAuth `state` query parameter to an HttpOnly `acu_oauth_state` cookie set at `/authorize`; mismatch burns the KV state record (`acumatica_state:{state}`) as well as rejecting the request, so the record is single-use even on mismatch.
 
 2. **Per-user Acumatica tokens.** Each MCP user gets their own Acumatica OAuth token stored in KV keyed by `user_token:{acumaticaUsername}`. The user's Acumatica role governs record-level access. The MCP server additionally requires the `MCP Access` role (gate check) and applies sensitive field redaction before returning data to Claude. **Scope is load-bearing:** `/authorize` requests plain `api` (`acumatica-auth-handler.ts`), **not** `api:concurrent_access` — under `api` each access token is a single Acumatica session that auto-closes at token expiry (~1 h), so the stateless client (`doFetch` reuses no session cookie, never calls `/entity/auth/logout`) never leaks API-user license seats. Don't switch the scope without rewriting the client to manage cookies + logout. See `docs/architecture.md` → "Acumatica Session & License Model".
 
@@ -100,17 +102,6 @@ Acumatica is the sole identity provider. Users log in with their Acumatica crede
 
 6. **`AppEnv` / `IKeyValueStore` abstraction.** Tool handlers and shared libraries (`config.ts`, `metadata-cache.ts`, `acumatica-oauth.ts`, `acumatica-client.ts`) use the platform-agnostic `AppEnv` type (which has `store: IKeyValueStore`) instead of the Cloudflare-specific `Env`. In `AcumaticaMcpServer.init()` we construct a fresh `this.appEnv: AppEnv` from `this.env` (never mutating the CF-provided binding object — that reference is shared across requests in the same isolate and hot-patching a `store` field onto it would leak state across sessions). `Env` no longer extends `AppEnv`; it only describes the CF bindings (plus Acumatica connection fields pulled from wrangler.jsonc). CF-specific code (auth handler, admin handler) uses raw `Env` / `KVNamespace` directly.
 
-## Historical Note: Why We Removed Microsoft Entra ID
-
-The initial design used a two-login chained OAuth flow: users first authenticated via Microsoft Entra ID (to identify who they are), then were chained to Acumatica OAuth (to get API permissions). This required a separate Entra app registration, three callback routes, and intermediate state management in KV.
-
-We removed Entra ID entirely because:
-- **It was redundant.** Since every user must authenticate with Acumatica anyway (to get a per-user API token with their role-based permissions), the Entra login added no value — Acumatica already knows who the user is.
-- **Acumatica can use Entra SSO natively.** If an Acumatica instance is configured with Entra SSO, users still get the Microsoft login experience — it just happens through Acumatica's own login page, not through our MCP server.
-- **Simpler flow.** One login instead of two. One callback route instead of three. No Entra secrets to manage.
-
-Old Entra-related secrets (`ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`, `ENTRA_TENANT_ID`) may still exist on the Cloudflare side and should be cleaned up with `wrangler secret delete`.
-
 ## File Structure
 
 ```
@@ -118,50 +109,12 @@ src/
 ├── index.ts                       # Entry point — OAuthProvider + AcumaticaMcpServer (McpAgent DO); re-exports TokenManager
 ├── token-manager.ts               # TokenManager DO — per-user token-refresh serializer (TOKEN_MANAGER binding)
 ├── auth/
-│   ├── acumatica-auth-handler.ts  # Acumatica OAuth flow (/authorize, /callback, /consent, access gate, OIDC discovery)
-│   └── acumatica-oauth.ts         # Token getter shim (→ AppEnv.tokenProvider) + shared refreshAcumaticaToken() helper
 ├── admin/
-│   └── admin-handler.ts           # Admin console: auth, settings, log viewer (Hono sub-app)
 ├── docs/
-│   ├── docs-handler.ts            # Hono sub-app: renders markdown docs to HTML, mounts admin
-│   └── markdown.d.ts              # TypeScript declaration for .md text module imports
 ├── lib/
-│   ├── acumatica-client.ts        # HTTP client for Acumatica REST API (GET + PUT-as-upsert); re-exports field-transforms
-│   ├── field-transforms.ts        # wrapFields/unwrapFields — {value:X} wire-format round-trip (import-free leaf, unit-tested)
-│   ├── odata-filter.ts            # normalizeODataFilter() — strips `eq true` off substringof/startswith/endswith
-│   ├── gi-registry.ts             # GI opt-in gate + curated-schema assembly (pure leaf: checkGiGate, parseEdmxTypes, assembleRegistry)
-│   ├── gi-registry-build.ts       # getGiRegistry() — lazy registry build (caller's token) + KV cache (impure)
-│   ├── gi-rows.ts                 # cleanGiRow/cleanGiRows — strip @odata + trim space-padded fixed-width values
-│   ├── complex-entities.ts        # known complex document entities + getFilterErrorKind() (filter-binder 500 classifier)
-│   ├── config.ts                  # KV-backed runtime config (uses IKeyValueStore)
-│   ├── kv-store.ts                # IKeyValueStore interface (platform-agnostic storage)
-│   ├── token-provider.ts          # ITokenProvider interface + TokenResult (platform-agnostic token serialization)
-│   ├── metadata-cache.ts           # KV-backed cache (uses IKeyValueStore)
-│   ├── blob-store.ts              # IBlobStore interface (platform-agnostic read of large index blobs)
-│   ├── index-store.ts             # loadIndex()/indexExists() — per-isolate-cached read of schema-knowledge indexes
-│   ├── schema-search.ts           # ISchemaSearch + KeywordSchemaSearch (seam for future Vectorize impl)
-│   ├── rate-limiter.ts            # 3 concurrent, 40/min limits
-│   ├── logger.ts                  # Structured JSON audit logging (tool, auth, redaction events)
-│   ├── preflight.ts               # Config diagnostics — admin page + /callback error mapping
-│   └── redact.ts                  # Pattern-based sensitive field redaction
 ├── platform/
-│   ├── cloudflare-kv-store.ts     # CloudflareKVStore — wraps KVNamespace as IKeyValueStore
-│   ├── cloudflare-r2-blob-store.ts # CloudflareR2BlobStore — IBlobStore backed by an R2 bucket
-│   └── do-token-provider.ts       # DOTokenProvider — ITokenProvider backed by the TokenManager DO
 ├── tools/                         # Registry-driven getters + utility + schema-knowledge handlers
-│   ├── getter-registry.ts         # 38 per-entity `acumatica_get_*` tools as data (GETTER_TOOLS) + runGetter
-│   ├── getter-errors.ts           # endpointAware404Message() — endpoint-aware 404 re-messaging (import-free leaf, unit-tested)
-│   ├── writer-registry.ts         # write tools as data (WRITER_TOOLS) + runWriter (kill-switch, dry-run gate, allowlist, PUT, audit sink)
-│   ├── writer-validation.ts       # validateWriterPayload() — size/JSON/type + top-level & nested allowlist (import-free leaf, unit-tested)
-│   ├── entity-list.ts             # acumatica_list_entities (Utility)
-│   ├── entity-schema.ts           # acumatica_describe_entity (Utility)
-│   ├── generic-inquiries.ts       # acumatica_run_inquiry (Utility)
-│   ├── generic-inquiry-discovery.ts # acumatica_list_generic_inquiries, _describe_inquiry (Utility)
-│   ├── clear-cache.ts             # acumatica_clear_cache (Utility)
-│   ├── schema-discovery.ts        # acumatica_search_schema, _get_schema_entity, _list_schema_entities (offline schema index)
-│   └── gi-explain.ts              # acumatica_explain_gi_xml (stateless GI XML structural summary)
 └── types/
-    └── acumatica.ts               # All TypeScript types, AppEnv, Env, AuthProps
 
 scripts/                           # OSS ingestion scripts (Apache-2.0); generated indexes stay private (.index/, gitignored)
 ├── build-schema-index.mjs         # swagger.json → .index/schema-index.json
@@ -180,6 +133,8 @@ acumatica/                         # Acumatica-side setup package (Apache-2.0) f
 ├── MCPGIs.xml, MCPGIFields.xml     # feed GIs the registry reads; MCPAccess.xml — role-gate canary GI
 └── README.md                       # import order + feed-column → gi-registry.ts mapping
 ```
+
+*Trimmed to the top two directory levels; per-file listings live in the source tree itself.*
 
 ## Schema Knowledge Tools (0.34.0)
 
@@ -281,25 +236,6 @@ npx wrangler secret put X     # Set a secret
 npx wrangler kv namespace create X  # Create KV namespace
 ```
 
-## Acumatica Version Upgrades
-
-When the connected instance moves to a new Acumatica release (e.g. 2025 R2 → 2026 R1) or is
-repointed at a different instance/tenant, follow **`docs/upgrading-acumatica.md`** (served at
-`/docs/upgrading-acumatica`). Summary of what's version-coupled in this server:
-
-1. **`ACUMATICA_ENDPOINT_VERSION`** (contract base `/entity/Default/{version}`) — update the var, redeploy; preflight (`/docs/admin/preflight`) flags a wrong value.
-2. **Schema-knowledge index** — re-export the instance's `swagger.json` and `npm run build-index` (0.34.0+); otherwise `acumatica_search_schema`/`_get_schema_entity`/`_list_schema_entities` describe the old shape. No redeploy needed; the next DO instance reads the new R2 object.
-3. **Runtime metadata cache** — `acumatica_clear_cache` (entity `$adHocSchema`, GI list, GI field schemas are cached 24 h / 1 h).
-4. **Access-control prerequisites** — `MCP Access` role + `MCPAccess` canary GI (OData-exposed) + Connected App (Authorization Code flow + redirect URIs; scopes are request-side, not configured on the app) survive upgrades but should be re-verified.
-5. **Hardcoded entities** — `GETTER_TOOLS` (`src/tools/getter-registry.ts`) entity names are stable across releases but spot-check key entities and update entries if upstream renames/removes one.
-6. **Two independent version numbers** — the **MCP server version** (`0.34.0`, bumps each release) vs. the **targeted Acumatica release** (the `25R2`/`26R1` *tag prefix*, changed only when re-targeting).
-
-> **Maintenance instruction (standing):** whenever a feature is added that depends on the
-> Acumatica version — a new index built from instance data (DAC, GI examples), a hardcoded
-> endpoint/entity, a new cached artifact, or a published meta-GI — add its concrete upgrade
-> step to `docs/upgrading-acumatica.md` (it has a "Forward-looking" section staging the
-> planned ones). Treat this as part of finishing such a feature, not a follow-up.
-
 ## Commit / Push / Tag Checklist
 
 Before every commit, push, or tag:
@@ -331,134 +267,6 @@ When the user says **"close session"**, perform all of the following:
 6. **Push** to `origin/main`
 7. **Tag** with `25R2-X.Y.Z` format
 8. **Deploy** with `npx wrangler deploy` and verify the deployment succeeds
-
-## Known Issues / Tech Debt
-
-- **User identity retrieval:** The OIDC `/identity/connect/userinfo` endpoint (with `openid profile email` scopes) is the primary method. Falls back to `/entity/auth/25.200.001/UserSecurityInfo` which may not exist on all instances. If both fail, username defaults to a UUID-based key (breaks token reuse across sessions).
-- **Acumatica system entities not available via contract API:** `User`, `UserRole`, and screen-based API (`/entity/Default/.../screen/SM201010`) all return 404 on SaaS instances. The canary GI approach for the access gate was adopted because of this limitation (there's no API to query role membership).
-- **`$select` on some entities causes Acumatica 500:** Some entities (e.g., Payment) return internal server errors when `$select` is used with certain field names. The `acumatica_list_entities` tool auto-retries without `$select` when this occurs.
-- **`substringof(...) eq true` silently returns `[]`:** Acumatica's contract-REST `$filter` parser returns an empty set (HTTP 200, no error) for a boolean string function compared to a literal — `substringof('X', F) eq true` / `startswith(...) eq true` / `endswith(...) eq true` — but the *bare* function works. Models habitually append `eq true` (valid OData v3). `normalizeODataFilter()` (`src/lib/odata-filter.ts`) strips it server-side for both `acumatica_list_entities` and `acumatica_run_inquiry`. `eq false` is left verbatim — the only equivalent negation (`not substringof(...)`) 500s on the contract API. NOT a transport/encoding bug (an early parens-encoding hypothesis was disproven live).
-- **Complex document entities can't be server-side `$filtered` on non-key fields:** PurchaseOrder, Shipment, PhysicalInventoryCount (and any filter that reaches a child collection, e.g. `StockItem/CrossReferences/AlternateID`) fail in two ways — (A) HTTP 500 from the OData filter binder (`CannotOptimizeException`, "type conversions not supported", "not a single value", "key not present") or (B) a *silent* `[]` even when matching rows exist (e.g. `substringof` on PurchaseOrder `VendorID`). A keyed filter (`OrderNbr`/`ShipmentNbr eq '...'`, topN=1) is optimizable and works; broad search must use a Generic Inquiry. `getFilterErrorKind()` (`src/lib/complex-entities.ts`) classifies mode-A 500s into a structured `filterNotApplicable` error; mode-B empties on the known-list entities get a `possibleFalseNegative` warning so the model doesn't conclude "no such record exists." The known-list is hardcoded — see `docs/upgrading-acumatica.md` §7.
-- Old Entra ID secrets may still exist on Cloudflare — clean up with `wrangler secret delete ENTRA_CLIENT_ID`, etc.
-- **Zod schema constraint:** MCP tool parameter schemas MUST use only simple types (`z.string()`, `z.string().optional()`, `z.string().default("value")`). Complex types like `z.record()`, `z.unknown()`, `z.number()` cause MCP SDK JSON Schema serialization failures and tools won't appear in client discovery. Use `z.string()` with manual `parseInt()` in the handler for numeric parameters.
-- **ChatGPT CIMD bug (as of April 2026):** ChatGPT's MCP client sees `client_id_metadata_document_supported: true` in our metadata but fails to complete CIMD (it doesn't have its own metadata document URL) and does not auto-fallback to DCR. Users must manually select DCR when adding the server in ChatGPT. Our server correctly advertises both — this is a ChatGPT client-side issue.
-- **Claude.ai tool list caching:** Claude.ai may cache the tool list from a previous Durable Object session. If tools appear stale, disconnect and reconnect the MCP server in Claude.ai to force a fresh `init()` call.
-- **Claude.ai re-auth is not silent, and can get stuck:** When the server revokes a grant (dead Acumatica token → `ReauthRequiredError`), the 401 + `WWW-Authenticate` *should* let the client re-run OAuth invisibly. In practice Claude.ai surfaces a **reconnect prompt** rather than re-authing silently, and after a few failed attempts it caches the connector in a dead state and stops prompting entirely. Recovery for an **org-managed** connector is a **personal disconnect → reconnect** (the org-level "delete" is not available/needed to individual users) — this clears the stuck personal grant and starts a fresh `/authorize` flow. The `0.33.0` TokenManager DO removes the *spurious* revokes (rotation races) that were triggering this; genuine dead-token revokes still prompt.
-- **`/authorize` error mapping on a bad/unfetchable `client_id` (fixed 0.38.5):** `app.get("/authorize")` wraps `parseAuthRequest()` in try/catch. A CIMD-fetch failure → **502** ("client's metadata endpoint down, not this server"); a malformed/invalid `client_id` → **400**; both log `authorize_parse_failed` (client_id + error, no secrets) for `wrangler tail`. Previously the throw surfaced as an opaque HTTP 500. This is **not** harmless: when Claude.ai's CIMD metadata endpoints (`claude.ai/oauth/mcp-oauth-client-metadata`, `…/claude-code-client-metadata`) had a transient 503 outage (observed 2026-07-06), the server-side CIMD fetch failed and *every* CIMD client (Claude.ai web + current Claude Desktop) hit the 500 and couldn't connect — DCR clients were unaffected. The 502 now makes that failure mode self-diagnosable from the server's own response/logs.
-- **No description metadata for Generic Inquiries.** *(Addressed in 0.37.0 via the GI registry — see "GI Tool Gating & Registry". The curation now lives in the `MCPGIs`/`MCPGIFields` feed GIs (`UsrAIDescription` fields), surfaced through the lazy registry; this is a hybrid of cures #2 and #3 below. The note is kept for the underlying-platform context.)* The Acumatica GI Design form (SM208000) has no free-text "Description" field on the header — only `Inquiry Title` (a short label, often just a prettified name) and `Site Map Title` (set only for nav-pinned GIs). The OData GI service document returns `{name, url}` only; nothing richer is exposed. As a result, `acumatica_list_generic_inquiries` surfaces GIs by name alone, leaving the model to guess which GI matches a user's intent. Parametrized GIs are already excluded at list time (see `generic-inquiry-discovery.ts` — `$metadata` is scanned for `FunctionImport Name="..._WithParameters"` entries and those are filtered out), so the gap is narrowly about selection context for the surviving non-parametrized GIs. Potential cures:
-  1. **MCP-side curation map.** KV-backed `gi_descriptions:{name} → text` edited from the admin console. Filter the list to GIs that have a description, inject the description into the response. Curation lives where it's consumed, zero Acumatica-side change. Downside: descriptions invisible inside Acumatica; admins must maintain a second list.
-  2. **Acumatica-side meta-GI.** Admin publishes a `MCPGIIndex` GI whose rows are `(Name, Description)` pulled from a custom table or hand-maintained dataset. Visible inside Acumatica, but heavier setup and the descriptions live separately from the GI definitions themselves.
-  3. **Extract GI definition (XML / GIQL) via API and auto-generate descriptions.** If Acumatica exposes the GI design body — tables joined, filters, output columns — through a screen-based API, OData $metadata annotations, or an export endpoint, feed each GI's structure to Claude Code (or any model) and have it produce a one-line description plus parameter/usage notes from the query itself. Cache the generated text alongside the existing GI metadata cache. Most automated of the three; requires verifying which API surface (if any) returns the design body on SaaS — historically system entities like `GenericInquiry` / `GIDesign` are not in the contract API (see the "system entities" note above), so this path likely depends on either a non-public endpoint or an admin-published export.
-
-## TODO — Remaining Project Work
-
-### Completed — Read-Only Tools (38 total, 0.1.0–0.10.0)
-- [x] Core: Customer, Vendor, SalesOrder (0.1.0)
-- [x] Financial/Accounting: Invoice, Bill, JournalTransaction, Payment, Account, Check (0.2.0)
-- [x] Inventory & Warehouse: StockItem, NonStockItem, InventoryQuantityAvailable, InventorySummaryInquiry, Warehouse, ItemClass (0.3.0)
-- [x] Purchasing: PurchaseOrder, PurchaseReceipt (0.4.0)
-- [x] Projects: Project, ProjectTask, ProjectBudget, ProjectTransaction (0.5.0)
-- [x] Service & Field: Case, ServiceOrder, Appointment (0.6.0)
-- [x] Sales & CRM: Contact, BusinessAccount, Opportunity, Lead, Salesperson (0.7.0)
-- [x] Shipping & Fulfillment: Shipment, SalesInvoice (0.8.0)
-- [x] HR & Payroll: Employee, ExpenseClaim, TimeEntry (0.9.0)
-- [x] CRM Activities: Email, Event, Activity, Task (0.10.0)
-
-### Completed — Utility/Discovery Tools (6 total, 0.11.0–0.20.0)
-- [x] Generic Inquiry: acumatica_run_inquiry (0.11.0)
-- [x] Entity List/Search: acumatica_list_entities (0.12.0)
-- [x] Entity Schema Discovery: acumatica_describe_entity (0.13.0)
-- [x] GI Discovery: acumatica_list_generic_inquiries, acumatica_describe_inquiry (0.16.0; switched to OData GI endpoint with OAuth 2.0 Bearer tokens)
-- [x] Metadata Cache: KV-backed caching for entity schemas (24h), GI lists (1h), GI field schemas (1h); acumatica_clear_cache tool for on-demand invalidation (0.20.0)
-
-### Completed — Documentation & Infrastructure
-- [x] Documentation site served from `/docs` on the same worker (0.14.0)
-- [x] docs/tool-reference.md, example-prompts.md, odata-filtering.md, architecture.md, self-hosting-guide.md
-- [x] CIMD support enabled alongside DCR, OpenID Connect discovery endpoint added (0.15.0)
-
-### Completed — Access Control & Governance (0.19.0)
-- [x] Access gate via canary GI (readability of `MCPAccess` GI checked over OData; role membership never queried)
-- [x] Consent interstitial page between access check and MCP session activation
-- [x] Sensitive field redaction (pattern-based, configurable via REDACT_PATTERNS/REDACT_SKIP)
-- [x] Enhanced audit logging (username in all entries, auth events, redaction events)
-- [x] OIDC userinfo for identity (openid profile email scopes)
-- [x] Auto-retry without $select on entity list 500 errors
-- [x] Anti-pagination tool descriptions and structured truncation envelope (`truncated`, `paginationSupported: false`, `actionRequired`) — instructs the model to ask the user for a narrower filter rather than retry
-- [x] `ACUMATICA_MAX_RECORDS` is runtime-overridable from the admin console (`config:acumatica_max_records` in KV)
-- [x] Storage abstraction layer — `IKeyValueStore` interface + `AppEnv` type for platform portability (0.23.0)
-- [x] Self-hosting documentation — `docs/self-hosting-guide.md` with Node.js adapter guide
-
-### Completed — Installation & Diagnostics (0.30.0)
-- [x] One-shot deploy script (`setup.sh`) + one-line installer (`install.sh`) with end-to-end preflight check
-- [x] "Deploy to Cloudflare" button — fully GUI install path; `wrangler.jsonc` now tracked as the deploy template
-- [x] Preflight diagnostic page at `/docs/admin/preflight` and `/callback` OAuth-error mapping via `interpretTokenError()`
-- [x] Tool description rework — instance-specific ID format wording, lookup pointers, expand/denylist/cache disclosures
-- [x] `runGetter` empty-string guard for required path-segment params
-
-### High Priority — Features
-- [~] Add write tools: Create/update Sales Orders, Customers, Vendors (per project brief Phase 2) — write-tool infrastructure (`WRITER_TOOLS` registry + `runWriter`, kill-switch, dry-run gate, top-level & nested allowlist, R2-persisted mutation audit) + first tool `acumatica_create_or_update_customer` landed 0.40.0; Vendor / SalesOrder are one registry entry each
-- [ ] Add action tools: Release Invoice, Confirm Shipment (per project brief Phase 3)
-- [x] Transparent re-auth when refresh token expires — `ReauthRequiredError` revokes the MCP grant so the client silently re-runs OAuth instead of a manual disconnect/reconnect (0.32.0)
-
-### Low Priority — Read-Only Tools
-
-**Financial (additional):**
-- [ ] AccountSummaryInquiry — GL account balances by period/ledger
-- [ ] AccountDetailsForPeriodInquiry — GL transaction detail for a period
-- [ ] CashSale — point-of-sale cash transactions
-- [ ] CashTransaction — bank deposits, withdrawals, transfers
-- [ ] Budget — GL budget lines by period
-- [ ] Ledger — ledger master data (actual, budget, statistical)
-- [ ] Subaccount — sub-account segments
-- [ ] Tax — tax ID master data
-- [ ] TaxCategory — tax category definitions
-- [ ] TaxZone — tax zone definitions
-
-**Sales (additional):**
-- [ ] CustomerLocation — customer ship-to/bill-to locations
-- [ ] CustomerClass — customer classification defaults
-- [ ] CustomerPaymentMethod — stored payment methods
-- [ ] SalesPricesInquiry — item price lookup
-- [ ] Discount / DiscountCode — discount rules
-
-**Purchasing (additional):**
-- [ ] VendorClass — vendor classification defaults
-- [ ] VendorPricesInquiry — vendor price lookup
-
-**Inventory (additional):**
-- [ ] InventoryAllocationInquiry — allocation breakdown (on hand, available, on PO, etc.)
-- [ ] StorageDetailsInquiry / StorageDetailsByLocationInquiry — lot/serial detail
-- [ ] ItemWarehouse — per-warehouse item settings
-- [ ] KitSpecification — kit/BOM definitions
-- [ ] TransferOrder — inter-warehouse transfers
-- [ ] InventoryAdjustment / InventoryIssue / InventoryReceipt — inventory transactions
-
-**Other:**
-- [ ] FinancialPeriod / FinancialYear — fiscal calendar
-- [ ] Currency — currency master data
-- [ ] ShipVia / ShippingTerm / ShippingZones — shipping config
-
-### Low Priority — Infrastructure
-- [ ] Add Attachment upload/download tools
-- [ ] Remove old Entra ID secrets from Cloudflare (`wrangler secret delete`)
-- [~] Add unit tests — `test/` harness added (`npm test`, node --test); covers filter normalization + complex-entity detection. Broader coverage still pending.
-- [ ] Add CI/CD pipeline
-
-## MCP Client Compatibility (as of April 2026)
-
-| Client | Registration | Status |
-|--------|-------------|--------|
-| Claude.ai (Team/Pro/Max/Enterprise) | CIMD | ✅ Works — observed `client_id=https://claude.ai/oauth/mcp-oauth-client-metadata` (CIMD, not DCR as previously documented) |
-| Claude Code (v2.1.81+) | CIMD preferred, DCR fallback | ✅ Works — publishes metadata at `https://claude.ai/oauth/claude-code-client-metadata` |
-| Claude Desktop | DCR | ✅ Works — uses `/register` |
-| ChatGPT | DCR (manual selection required) | ⚠️ Works with manual DCR — CIMD auto-detection broken on their side |
-
-### OAuth Discovery Endpoints
-
-The server responds on three well-known paths (all return identical metadata):
-- `/.well-known/oauth-protected-resource` (and `/mcp` suffixed variant) — RFC 9728
-- `/.well-known/oauth-authorization-server` — RFC 8414
-- `/.well-known/openid-configuration` — added for ChatGPT compatibility (proxies to oauth-authorization-server)
 
 ## Acumatica API Patterns
 

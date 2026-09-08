@@ -304,3 +304,53 @@ prefix tracks the targeted Acumatica release, 2025 R2).
 ## [0.1.0] - 2026-04-06
 ### Added
 - Initial Acumatica MCP server: OAuth auth (Acumatica as sole IdP) and the first read-only tools (Customer, Vendor, SalesOrder). Microsoft Entra ID removed in favor of direct Acumatica OAuth.
+
+---
+
+## Feature Completion Summary (migrated from CLAUDE.md, 2026-09-08)
+
+CLAUDE.md tracked completed work as a categorized checklist alongside its remaining-work TODO list. The categories below cover the same 0.1.0-0.30.0 history as the dated entries above, grouped by feature area instead of by version. Kept here for that grouping; the dated entries above remain the authoritative record.
+
+### Completed — Read-Only Tools (38 total, 0.1.0–0.10.0)
+- [x] Core: Customer, Vendor, SalesOrder (0.1.0)
+- [x] Financial/Accounting: Invoice, Bill, JournalTransaction, Payment, Account, Check (0.2.0)
+- [x] Inventory & Warehouse: StockItem, NonStockItem, InventoryQuantityAvailable, InventorySummaryInquiry, Warehouse, ItemClass (0.3.0)
+- [x] Purchasing: PurchaseOrder, PurchaseReceipt (0.4.0)
+- [x] Projects: Project, ProjectTask, ProjectBudget, ProjectTransaction (0.5.0)
+- [x] Service & Field: Case, ServiceOrder, Appointment (0.6.0)
+- [x] Sales & CRM: Contact, BusinessAccount, Opportunity, Lead, Salesperson (0.7.0)
+- [x] Shipping & Fulfillment: Shipment, SalesInvoice (0.8.0)
+- [x] HR & Payroll: Employee, ExpenseClaim, TimeEntry (0.9.0)
+- [x] CRM Activities: Email, Event, Activity, Task (0.10.0)
+
+### Completed — Utility/Discovery Tools (6 total, 0.11.0–0.20.0)
+- [x] Generic Inquiry: acumatica_run_inquiry (0.11.0)
+- [x] Entity List/Search: acumatica_list_entities (0.12.0)
+- [x] Entity Schema Discovery: acumatica_describe_entity (0.13.0)
+- [x] GI Discovery: acumatica_list_generic_inquiries, acumatica_describe_inquiry (0.16.0; switched to OData GI endpoint with OAuth 2.0 Bearer tokens)
+- [x] Metadata Cache: KV-backed caching for entity schemas (24h), GI lists (1h), GI field schemas (1h); acumatica_clear_cache tool for on-demand invalidation (0.20.0)
+
+### Completed — Documentation & Infrastructure
+- [x] Documentation site served from `/docs` on the same worker (0.14.0)
+- [x] docs/tool-reference.md, example-prompts.md, odata-filtering.md, architecture.md, self-hosting-guide.md
+- [x] CIMD support enabled alongside DCR, OpenID Connect discovery endpoint added (0.15.0)
+
+### Completed — Access Control & Governance (0.19.0)
+- [x] Access gate via canary GI (readability of `MCPAccess` GI checked over OData; role membership never queried)
+- [x] Consent interstitial page between access check and MCP session activation
+- [x] Sensitive field redaction (pattern-based, configurable via REDACT_PATTERNS/REDACT_SKIP)
+- [x] Enhanced audit logging (username in all entries, auth events, redaction events)
+- [x] OIDC userinfo for identity (openid profile email scopes)
+- [x] Auto-retry without $select on entity list 500 errors
+- [x] Anti-pagination tool descriptions and structured truncation envelope (`truncated`, `paginationSupported: false`, `actionRequired`) — instructs the model to ask the user for a narrower filter rather than retry
+- [x] `ACUMATICA_MAX_RECORDS` is runtime-overridable from the admin console (`config:acumatica_max_records` in KV)
+- [x] Storage abstraction layer — `IKeyValueStore` interface + `AppEnv` type for platform portability (0.23.0)
+- [x] Self-hosting documentation — `docs/self-hosting-guide.md` with Node.js adapter guide
+
+### Completed — Installation & Diagnostics (0.30.0)
+- [x] One-shot deploy script (`setup.sh`) + one-line installer (`install.sh`) with end-to-end preflight check
+- [x] "Deploy to Cloudflare" button — fully GUI install path; `wrangler.jsonc` now tracked as the deploy template
+- [x] Preflight diagnostic page at `/docs/admin/preflight` and `/callback` OAuth-error mapping via `interpretTokenError()`
+- [x] Tool description rework — instance-specific ID format wording, lookup pointers, expand/denylist/cache disclosures
+- [x] `runGetter` empty-string guard for required path-segment params
+

@@ -22,6 +22,7 @@ Complete specification for all 49 tools available in the MCP4Acumatica (v0.40.0)
 - [Shipping & Fulfillment](#shipping--fulfillment)
 - [HR & Payroll](#hr--payroll)
 - [CRM Activities](#crm-activities)
+- [MCP Client Compatibility](#mcp-client-compatibility-as-of-april-2026)
 
 ---
 
@@ -819,3 +820,24 @@ Retrieve a CRM task by note ID.
 **Endpoint:** `GET /entity/Default/25.200.001/Task/{noteID}`
 
 **Returns:** Summary, status, priority, due date, completion percentage, related activities/tasks, and owner.
+
+---
+
+## MCP Client Compatibility (as of April 2026)
+
+(Moved from CLAUDE.md, 2026-09-08.)
+
+| Client | Registration | Status |
+|--------|-------------|--------|
+| Claude.ai (Team/Pro/Max/Enterprise) | CIMD | ✅ Works — observed `client_id=https://claude.ai/oauth/mcp-oauth-client-metadata` (CIMD, not DCR as previously documented) |
+| Claude Code (v2.1.81+) | CIMD preferred, DCR fallback | ✅ Works — publishes metadata at `https://claude.ai/oauth/claude-code-client-metadata` |
+| Claude Desktop | DCR | ✅ Works — uses `/register` |
+| ChatGPT | DCR (manual selection required) | ⚠️ Works with manual DCR — CIMD auto-detection broken on their side |
+
+### OAuth Discovery Endpoints
+
+The server responds on three well-known paths (all return identical metadata):
+- `/.well-known/oauth-protected-resource` (and `/mcp` suffixed variant) — RFC 9728
+- `/.well-known/oauth-authorization-server` — RFC 8414
+- `/.well-known/openid-configuration` — added for ChatGPT compatibility (proxies to oauth-authorization-server)
+
